@@ -80,6 +80,15 @@ function dependencyChip(dep) {
     return `<span class="px-2.5 py-1 rounded-md text-[10px] font-mono well text-[var(--text-muted)]">${name}${varsText}</span>`;
 }
 
+function escapeHtml(str) {
+    return String(str).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function escapeAttr(str) {
+    // For use in HTML attribute values encoded as JSON (double-quoted context)
+    return String(str).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+}
+
 function render() {
     const list = document.getElementById('vuln-list');
     const searchTerm = document.getElementById('search-input')?.value.toLowerCase() || '';
@@ -90,7 +99,7 @@ function render() {
     // Keep the dependency-name autocomplete list in sync
     const datalist = document.getElementById('configuration-names');
     if (datalist) {
-        datalist.innerHTML = configurations.map(c => `<option value="${c.name}"></option>`).join('');
+        datalist.innerHTML = configurations.map(c => `<option value="${escapeAttr(c.name)}"></option>`).join('');
     }
 
     let filtered = configurations.filter(config => {
@@ -108,36 +117,38 @@ function render() {
     filtered.forEach(config => {
         const isService = config.category === 'service';
         const hasDeps = config.depends_on && config.depends_on.length;
-        const configJson = JSON.stringify(config).replace(/'/g, "&apos;");
+        // Use base64-encoded JSON for safe data attribute storage
+        const encodedJson = btoa(unescape(encodeURIComponent(JSON.stringify(config))));
 
         const card = document.createElement('div');
         card.className = 'card rounded-xl p-4 flex flex-col';
+        card.dataset.config = encodedJson;
 
-        const scriptBlock = `<pre class="text-xs font-mono text-[var(--text)] bg-[var(--code-bg)] border border-[var(--code-border)] p-3 rounded-md overflow-x-auto leading-relaxed mb-3"><code class="language-${config.type === 'powershell' ? 'powershell' : config.type === 'bash' ? 'bash' : 'dos'}">${config.script.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</code></pre>`;
+        const scriptBlock = `<pre class="text-xs font-mono text-[var(--text)] bg-[var(--code-bg)] border border-[var(--code-border)] p-3 rounded-md overflow-x-auto leading-relaxed mb-3"><code class="language-${config.type === 'powershell' ? 'powershell' : config.type === 'bash' ? 'bash' : 'dos'}">${escapeHtml(config.script)}</code></pre>`;
 
         card.innerHTML = `
             <div class="flex justify-between items-start mb-3">
                 <div>
-                    <h3 class="text-base font-bold text-[var(--text)] mb-1.5 tracking-wide">${config.name}</h3>
+                    <h3 class="text-base font-bold text-[var(--text)] mb-1.5 tracking-wide">${escapeHtml(config.name)}</h3>
                     <span class="inline-flex gap-1.5 flex-wrap">
-                        <span class="px-2.5 py-1 rounded-md text-[10px] font-bold text-glow-pink well uppercase tracking-wider">${config.category}</span>
-                        <span class="px-2.5 py-1 rounded-md text-[10px] font-bold text-glow-cyan well uppercase tracking-wider">${config.platform}</span>
-                        <span class="px-2.5 py-1 rounded-md text-[10px] font-bold well uppercase tracking-wider">${config.run_as}</span>
+                        <span class="px-2.5 py-1 rounded-md text-[10px] font-bold text-glow-pink well uppercase tracking-wider">${escapeHtml(config.category)}</span>
+                        <span class="px-2.5 py-1 rounded-md text-[10px] font-bold text-glow-cyan well uppercase tracking-wider">${escapeHtml(config.platform)}</span>
+                        <span class="px-2.5 py-1 rounded-md text-[10px] font-bold well uppercase tracking-wider">${escapeHtml(config.run_as)}</span>
                         ${config.attachments && config.attachments.length ? `<span class="px-2.5 py-1 rounded-md text-[10px] font-bold well uppercase tracking-wider" title="${config.attachments.length} attachment(s)">&#128206; ${config.attachments.length}</span>` : ''}
                     </span>
                     ${isService && hasDeps ? `<div class="flex flex-wrap gap-1 mt-2">${config.depends_on.map(dependencyChip).join('')}</div>` : ''}
                 </div>
                 <div class="flex gap-2 shrink-0">
-                    <button onclick='editConfig(${configJson})' class="p-2 btn rounded-lg text-glow-cyan" title="Edit Configuration">
+                    <button data-action="edit" class="p-2 btn rounded-lg text-glow-cyan" title="Edit Configuration">
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" /></svg>
                     </button>
-                    <button onclick='deleteConfig(${config.id})' class="p-2 btn rounded-lg text-[var(--accent-pink)]" title="Delete Configuration">
+                    <button data-action="delete" class="p-2 btn rounded-lg text-[var(--accent-pink)]" title="Delete Configuration">
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
                     </button>
                 </div>
             </div>
 
-            ${isService ? `<button type="button" onclick='editConfig(${configJson})' class="text-[10px] btn px-2.5 py-1.5 rounded-md text-glow-cyan font-bold uppercase tracking-wide self-start mb-1">View / Edit Script</button>` : scriptBlock}
+            ${isService ? `<button type="button" data-action="edit" class="text-[10px] btn px-2.5 py-1.5 rounded-md text-glow-cyan font-bold uppercase tracking-wide self-start mb-1">View / Edit Script</button>` : scriptBlock}
 
             ${!isService && hasDeps ? `
                 <div>
@@ -155,6 +166,23 @@ function render() {
         hljs.highlightElement(block);
     });
 }
+
+// Event delegation for card actions (edit/delete)
+document.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-action]');
+    if (!btn) return;
+
+    const card = btn.closest('[data-config]');
+    if (!card) return;
+
+    const config = JSON.parse(decodeURIComponent(escape(atob(card.dataset.config))));
+
+    if (btn.dataset.action === 'edit') {
+        editConfig(config);
+    } else if (btn.dataset.action === 'delete') {
+        deleteConfig(config.id);
+    }
+});
 
 // Dependency-row widget logic
 function addVarRow(varsContainer, key = '', value = '') {
