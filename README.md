@@ -1,9 +1,21 @@
-# VulnDB Nexus
+# VulnDB UI
 
-A catalog and editor for the scripted vulnerabilities, misconfigurations, and
-services used to provision vulnerable lab/range machines. It's a small
-Express API backed by MySQL (reached over an SSH tunnel) with a vanilla-JS
+A web-based catalog and editor for the scripted vulnerabilities, misconfigurations, and
+services used to provision vulnerable lab/range machines. Built for CTF teams, red teams, and
+cyber range operators who manage fleets of deliberately vulnerable machines.
+
+It's a small Express API backed by MySQL (reached over an SSH tunnel) with a vanilla-JS
 frontend for browsing, editing, and wiring up dependencies between entries.
+
+## Ecosystem
+
+VulnDB UI is the **authoring interface**. It stores configuration definitions in a MySQL
+database and file attachments in MinIO. A separate client — **nakon** — pulls these
+configurations from the database and applies them to target machines. The data flow:
+
+```
+vulndb-ui (this repo) ──stores──▶ MySQL + MinIO ──reads──▶ nakon (client) ──applies──▶ target machine
+```
 
 ## How it works
 
