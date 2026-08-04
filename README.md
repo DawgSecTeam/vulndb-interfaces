@@ -70,6 +70,45 @@ There's currently no templating/placeholder syntax for attachments in the
 script editor (unlike `depends_on` vars) — this is purely a filesystem
 convention between vulndb-ui and the client that runs the scripts.
 
+## CLI
+
+`cli.js` is a thin wrapper around vulndb-ui's own HTTP API for scripting
+attachment uploads/downloads and browsing the catalog without opening the
+web UI. It's registered as the `vulndb-cli` bin (see `package.json`), so
+after `npm install` (or `npm link` for local dev) it's available as
+`vulndb-cli`; otherwise run it directly with `node cli.js`.
+
+```
+vulndb-cli [--url <vulndb-ui url>] <command> [args]
+```
+
+Commands:
+
+| Command | Description |
+|---|---|
+| `list` | List all configurations (id, platform, category, name, attachment count) |
+| `get <id>` | Print one configuration as JSON, including its `attachments` array |
+| `upload <id> <file>` | Upload `<file>` as an attachment on configuration `<id>` |
+| `download <attachmentId> <outfile>` | Download an attachment by id to `<outfile>` (follows the presigned MinIO redirect) |
+| `delete-attachment <attachmentId>` | Delete an attachment by id |
+
+**Base URL** resolution, in order: the `--url <url>` flag, then
+`$VULNDB_UI_URL`, then `http://127.0.0.1:3000`. `VULNDB_UI_URL` is the same
+env var name nakon itself uses, so setting it once in the environment
+covers both tools.
+
+```bash
+vulndb-cli list
+vulndb-cli get 7
+vulndb-cli upload 7 ./malicious.conf
+vulndb-cli download 14 ./staging/malicious.conf
+vulndb-cli delete-attachment 14
+vulndb-cli --url http://10.0.0.118:3000 list
+```
+
+Errors from the API (non-2xx responses) are printed with the response body
+and exit the process with status 1.
+
 ## Database structure
 
 Two tables: `configurations`, and `attachments` (files attached to a
