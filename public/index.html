@@ -199,6 +199,13 @@
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 1020.354 15.354z" />
                     </svg>
                 </button>
+                <button onclick="openBackupsModal()"
+                    class="btn font-bold py-2.5 px-5 rounded-lg flex items-center gap-2 flex-1 md:flex-initial justify-center tracking-wide uppercase text-xs">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.25 7.5l-.625 10.632a2.25 2.25 0 01-2.247 2.118H6.622a2.25 2.25 0 01-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125z" />
+                    </svg>
+                    Backups
+                </button>
                 <button onclick="openConfigModal()"
                     class="btn text-glow-cyan font-bold py-2.5 px-5 rounded-lg flex items-center gap-2 flex-1 md:flex-initial justify-center tracking-wide uppercase text-xs">
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
@@ -350,6 +357,43 @@
             <div class="flex justify-center gap-3">
                 <button type="button" onclick="closeConfirmModal()" class="flex-1 btn py-2.5 rounded-lg text-[var(--text-muted)] font-bold uppercase text-xs tracking-wide">Cancel</button>
                 <button type="button" id="confirm-modal-btn" class="flex-1 btn py-2.5 rounded-lg text-[var(--accent-pink)] font-bold uppercase text-xs tracking-wide">Delete</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Backups Modal -->
+    <div id="backups-modal" class="fixed inset-0 flex items-center justify-center z-50 hidden p-4">
+        <div class="absolute inset-0 bg-black/55 backdrop-blur-sm" onclick="closeBackupsModal()"></div>
+        <div class="card modal-panel w-full max-w-2xl p-6 rounded-xl relative z-10 modal-enter max-h-[85vh] overflow-y-auto custom-scrollbar">
+            <div class="flex items-center justify-between mb-2">
+                <h2 class="text-lg font-bold text-glow-pink uppercase tracking-wider">Backups</h2>
+                <button type="button" onclick="triggerBackup()" id="backup-now-btn"
+                    class="btn text-glow-cyan font-bold py-2 px-4 rounded-lg text-xs uppercase tracking-wide shrink-0">Back Up Now</button>
+            </div>
+            <p class="text-[10px] text-[var(--text-faint)] mb-4">Taken automatically on a schedule and kept for a limited time. Restoring overwrites the live database — a safety backup of the current database is taken first.</p>
+            <div id="backups-list" class="space-y-1.5"></div>
+        </div>
+    </div>
+
+    <!-- Restore Confirm Modal (type-to-confirm, since this overwrites the live database) -->
+    <div id="restore-modal" class="fixed inset-0 flex items-center justify-center z-[70] hidden p-4">
+        <div class="absolute inset-0 bg-black/55 backdrop-blur-sm" onclick="closeRestoreModal()"></div>
+        <div class="card modal-panel w-full max-w-sm p-6 rounded-xl relative z-10 modal-enter text-center">
+            <div class="w-12 h-12 mx-auto mb-4 rounded-full flex items-center justify-center well text-[var(--accent-pink)]">
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                </svg>
+            </div>
+            <h2 class="text-base font-bold mb-2 text-[var(--text)] uppercase tracking-wider">Restore Backup</h2>
+            <p class="text-sm text-[var(--text-muted)] mb-1 leading-relaxed">This overwrites the <strong>live database</strong> with the contents of:</p>
+            <p id="restore-modal-filename" class="text-xs font-mono text-[var(--text)] mb-4 break-all"></p>
+            <p class="text-[10px] text-[var(--text-faint)] mb-4">A safety backup of the current database is taken automatically first. Type the filename above to confirm.</p>
+            <input type="text" id="restore-confirm-input" placeholder="type the filename to confirm"
+                class="w-full input-field rounded-lg px-3 py-2 text-xs font-mono mb-4">
+            <div class="flex justify-center gap-3">
+                <button type="button" onclick="closeRestoreModal()" class="flex-1 btn py-2.5 rounded-lg text-[var(--text-muted)] font-bold uppercase text-xs tracking-wide">Cancel</button>
+                <button type="button" id="restore-modal-btn" disabled
+                    class="flex-1 btn py-2.5 rounded-lg text-[var(--accent-pink)] font-bold uppercase text-xs tracking-wide opacity-40 cursor-not-allowed">Restore</button>
             </div>
         </div>
     </div>

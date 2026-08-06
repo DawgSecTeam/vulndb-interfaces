@@ -327,6 +327,64 @@ async function cmdRenameAttachment(base, attachmentId, newName) {
     console.log(JSON.stringify(renamed, null, 2));
 }
 
+// ---------------------------------------------------------------------------- backups
+
+function formatBytes(n) {
+    if (n < 1024) return `${n} B`;
+    const units = ['KB', 'MB', 'GB'];
+    let v = n / 1024, i = 0;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return `${v.toFixed(1)} ${units[i]}`;
+}
+
+async function cmdBackup(base, assumeYes) {
+    await confirm(`trigger a backup of the database on ${base} now`, assumeYes);
+    const backup = await apiJson('POST', `${base}/api/backups`);
+    console.log(`created ${backup.filename} (${formatBytes(backup.size_bytes)})`);
+}
+
+async function cmdListBackups(base, args) {
+    const asJson = takeFlag(args, 'json');
+    const backups = await apiJson('GET', `${base}/api/backups`);
+    if (asJson) {
+        console.log(JSON.stringify(backups, null, 2));
+        return;
+    }
+    for (const b of backups) {
+        console.log(`${b.created_at}  ${formatBytes(b.size_bytes).padStart(9)}  ${b.filename}`);
+    }
+    console.log(`\n${backups.length} backup(s)`);
+}
+
+async function cmdRestoreBackup(base, filename, assumeYes) {
+    // The one command in this CLI more dangerous than delete — it overwrites the live DB — so
+    // it gets the strongest confirmation wording rather than the usual one-liner.
+    await confirm(
+        `RESTORE ${filename} on ${base} — this OVERWRITES the live database with this backup's contents.\n` +
+        `A fresh safety backup of the current database is taken automatically first.`,
+        assumeYes,
+    );
+    const result = await apiJson('POST', `${base}/api/backups/${encodeURIComponent(filename)}/restore`);
+    console.log(`restored from ${result.restored} (safety backup taken first: ${result.safety_backup})`);
+}
+
+async function cmdDownloadBackup(base, filename, outFile) {
+    const res = await fetch(`${base}/api/backups/${encodeURIComponent(filename)}/download`);
+    if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`download -> ${res.status} ${res.statusText}\n${text}`);
+    }
+    const buffer = Buffer.from(await res.arrayBuffer());
+    fs.writeFileSync(outFile, buffer);
+    console.log(`saved ${buffer.length} bytes to ${outFile}`);
+}
+
+async function cmdDeleteBackup(base, filename, assumeYes) {
+    await confirm(`delete backup ${filename} from ${base}`, assumeYes);
+    await apiJson('DELETE', `${base}/api/backups/${encodeURIComponent(filename)}`);
+    console.log(`deleted ${filename}`);
+}
+
 // ---------------------------------------------------------------------------- entry point
 
 const USAGE = `usage: vulndb-cli [--url <vulndb-ui url>] <command> [args]
@@ -350,7 +408,15 @@ attachments:
   download <attachmentId> <outfile>    download an attachment by id
   rename-attachment <attachmentId> <newName>
                                        rename an attachment
-  delete-attachment <attachmentId>     delete an attachment by id`;
+  delete-attachment <attachmentId>     delete an attachment by id
+
+backups (server backs up the DB automatically; these are for on-demand use):
+  backup                                trigger a backup of the database now
+  list-backups [--json]                 list available backups
+  restore-backup <filename>             OVERWRITE the live database from a backup
+                                         (a safety backup of the current DB is taken first)
+  download-backup <filename> <outfile>  download a backup file
+  delete-backup <filename>              delete a backup file`;
 
 async function main() {
     const args = process.argv.slice(2);
@@ -387,6 +453,19 @@ async function main() {
         case 'delete-attachment':
             if (!rest[0]) throw new Error('usage: delete-attachment <attachmentId>');
             return cmdDeleteAttachment(base, rest[0]);
+        case 'backup':
+            return cmdBackup(base, assumeYes);
+        case 'list-backups':
+            return cmdListBackups(base, rest);
+        case 'restore-backup':
+            if (!rest[0]) throw new Error('usage: restore-backup <filename>');
+            return cmdRestoreBackup(base, rest[0], assumeYes);
+        case 'download-backup':
+            if (!rest[0] || !rest[1]) throw new Error('usage: download-backup <filename> <outfile>');
+            return cmdDownloadBackup(base, rest[0], rest[1]);
+        case 'delete-backup':
+            if (!rest[0]) throw new Error('usage: delete-backup <filename>');
+            return cmdDeleteBackup(base, rest[0], assumeYes);
         default:
             console.error(USAGE);
             process.exit(cmd ? 1 : 0);

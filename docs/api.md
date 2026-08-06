@@ -43,6 +43,25 @@ stores the bytes and a display name. The convention is that whatever runs the sc
 the attachments into the script's working directory, named by `original_name`, so the script can
 reference them as a relative path (`cp ./malicious.conf /etc/vsftpd.conf`).
 
+## Backups
+
+The server takes a `mysqldump` backup automatically on a schedule (`BACKUP_CRON`, default daily)
+and prunes old ones (`BACKUP_RETENTION`, default 30) — see the [README](../README.md#backups).
+These endpoints are for on-demand use from the webui's "Backups" panel or `vulndb-cli`.
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/backups` | List backups, newest first: `{ filename, size_bytes, created_at }`. |
+| `POST /api/backups` | Trigger a backup now. Returns `201` with the new backup's metadata. |
+| `GET /api/backups/:filename/download` | Download a backup file (`.sql.gz`). |
+| `POST /api/backups/:filename/restore` | **Overwrites the live database** with the backup's contents. Takes a fresh safety backup of the current database first. Returns `{ restored, safety_backup }`. |
+| `DELETE /api/backups/:filename` | Delete a backup file. |
+
+`:filename` is validated against the exact pattern the server generates (`vulndb-backup-<ISO
+timestamp>.sql.gz`); anything else is rejected before touching the filesystem. Backup/restore
+endpoints return `500` if `mysqldump`/`mysql` (or `mariadb-dump`/`mariadb`) aren't installed on
+the server's host.
+
 ## Data model
 
 Two tables: `configurations`, and `attachments` (see above).

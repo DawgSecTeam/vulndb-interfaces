@@ -7,6 +7,9 @@ const os = require('os');
 const crypto = require('crypto');
 const multer = require('multer');
 const Minio = require('minio');
+const zlib = require('zlib');
+const { spawn, execFile } = require('child_process');
+const cron = require('node-cron');
 require('dotenv').config();
 
 const app = express();
@@ -30,6 +33,29 @@ if (missingEnv.length) {
 let pool;
 let minioClient;
 const upload = multer({ dest: os.tmpdir() });
+
+// Backup config — all optional so existing deployments don't break. The DB runs on the same
+// host as this server (the SSH tunnel above is only a dev-time convenience), so backups shell
+// out to the real mysqldump/mysql client tools locally rather than hand-rolling a dump.
+const PUBLIC_DIR = path.join(__dirname, 'public');
+const BACKUP_DIR = path.resolve(process.env.BACKUP_DIR || path.join(os.homedir(), '.vulndb-backups'));
+const BACKUP_CRON = process.env.BACKUP_CRON || '0 3 * * *'; // daily at 3am; 'off' disables scheduling
+const BACKUP_RETENTION = Number(process.env.BACKUP_RETENTION) || 30;
+
+// public/ is served with express.static — backups must never be able to land there, or they'd
+// be downloadable by anyone without going through the (validated) /api/backups routes.
+if (BACKUP_DIR === PUBLIC_DIR || BACKUP_DIR.startsWith(PUBLIC_DIR + path.sep)) {
+    console.error(`BACKUP_DIR (${BACKUP_DIR}) resolves inside the statically-served public/ directory — refusing to start.`);
+    process.exit(1);
+}
+
+fs.mkdirSync(BACKUP_DIR, { recursive: true, mode: 0o700 });
+try {
+    const mode = fs.statSync(BACKUP_DIR).mode & 0o777;
+    if (mode & 0o077) {
+        console.warn(`Warning: BACKUP_DIR (${BACKUP_DIR}) is readable/writable beyond its owner (mode ${mode.toString(8)}) — consider chmod 700.`);
+    }
+} catch { /* best-effort check only */ }
 
 const setupDatabase = () => {
     return new Promise((resolve, reject) => {
@@ -106,6 +132,161 @@ const setupMinio = async () => {
         console.log(`Created MinIO bucket "${bucket}"`);
     }
 };
+
+// ---------------------------------------------------------------------------- backups
+
+// MariaDB hosts sometimes only ship the newer mariadb-dump/mariadb names, so try the classic
+// names first and fall back rather than hard-failing at startup — the rest of the app works
+// fine without either, backups just won't until the client tools are installed.
+let dumpTool = null;
+let clientTool = null;
+
+function checkTool(cmd) {
+    return new Promise(resolve => execFile(cmd, ['--version'], err => resolve(!err)));
+}
+
+const resolveBackupTools = async () => {
+    dumpTool = (await checkTool('mysqldump')) ? 'mysqldump' : (await checkTool('mariadb-dump')) ? 'mariadb-dump' : null;
+    clientTool = (await checkTool('mysql')) ? 'mysql' : (await checkTool('mariadb')) ? 'mariadb' : null;
+    if (!dumpTool || !clientTool) {
+        console.warn('Warning: mysqldump/mysql (or mariadb-dump/mariadb) not found on PATH — DB backups and restores will fail until the MySQL/MariaDB client tools are installed on this host.');
+    }
+};
+
+const BACKUP_FILENAME_RE = /^vulndb-backup-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z\.sql\.gz$/;
+
+function backupFilename(date = new Date()) {
+    return `vulndb-backup-${date.toISOString().replace(/[:.]/g, '-')}.sql.gz`;
+}
+
+// A short-lived credentials file beats `-p<password>` or MYSQL_PWD — neither should show up in
+// `ps`, and MYSQL_PWD is also visible to anything that can read /proc/<pid>/environ.
+function writeClientCnf() {
+    const cnfPath = path.join(os.tmpdir(), `vulndb-backup-${crypto.randomUUID()}.cnf`);
+    fs.writeFileSync(cnfPath, `[client]\nuser=${process.env.DB_USER}\npassword=${process.env.DB_PASSWORD}\n`, { mode: 0o600 });
+    return cnfPath;
+}
+
+// Resolves a filename param to a real path inside BACKUP_DIR, or null if it doesn't look like a
+// backup this server generated — the regex alone rules out traversal, the dirname check is
+// defense in depth against a future looser regex.
+function resolveBackupPath(filename) {
+    if (typeof filename !== 'string' || !BACKUP_FILENAME_RE.test(filename)) return null;
+    const resolved = path.join(BACKUP_DIR, filename);
+    if (path.dirname(resolved) !== BACKUP_DIR) return null;
+    return resolved;
+}
+
+async function listBackups() {
+    const entries = await fs.promises.readdir(BACKUP_DIR).catch(() => []);
+    const backups = await Promise.all(
+        entries.filter(name => BACKUP_FILENAME_RE.test(name)).map(async name => {
+            const stat = await fs.promises.stat(path.join(BACKUP_DIR, name));
+            return { filename: name, size_bytes: stat.size, created_at: stat.mtime.toISOString() };
+        })
+    );
+    // Filenames are ISO-timestamp based, so a lexical sort is also a chronological one.
+    backups.sort((a, b) => b.filename.localeCompare(a.filename));
+    return backups;
+}
+
+async function pruneOldBackups() {
+    const stale = (await listBackups()).slice(BACKUP_RETENTION);
+    await Promise.all(stale.map(b => fs.promises.unlink(path.join(BACKUP_DIR, b.filename)).catch(() => {})));
+}
+
+function runBackup() {
+    return new Promise((resolve, reject) => {
+        if (!dumpTool) {
+            return reject(new Error('mysqldump (or mariadb-dump) is not available on PATH — install MySQL/MariaDB client tools on this host'));
+        }
+
+        const filename = backupFilename();
+        const destPath = path.join(BACKUP_DIR, filename);
+        const cnfPath = writeClientCnf();
+
+        let settled = false;
+        const fail = err => {
+            if (settled) return;
+            settled = true;
+            fs.unlink(cnfPath, () => {});
+            fs.unlink(destPath, () => {});
+            reject(err);
+        };
+
+        const dump = spawn(dumpTool, [
+            `--defaults-extra-file=${cnfPath}`,
+            '-h', process.env.DB_HOST || '127.0.0.1',
+            '-P', String(process.env.DB_PORT || 3306),
+            '--single-transaction', '--quick', '--routines', '--triggers',
+            process.env.DB_NAME,
+        ]);
+
+        let stderr = '';
+        dump.stderr.on('data', chunk => { stderr += chunk; });
+        dump.on('error', fail);
+        dump.on('close', code => {
+            if (code !== 0) fail(new Error(`${dumpTool} exited with code ${code}: ${stderr.trim()}`));
+        });
+
+        const out = fs.createWriteStream(destPath, { mode: 0o600 });
+        out.on('error', fail);
+        dump.stdout.pipe(zlib.createGzip()).pipe(out);
+
+        out.on('finish', async () => {
+            if (settled) return;
+            settled = true;
+            fs.unlink(cnfPath, () => {});
+            try {
+                const stat = await fs.promises.stat(destPath);
+                await pruneOldBackups();
+                resolve({ filename, size_bytes: stat.size, created_at: stat.mtime.toISOString() });
+            } catch (err) {
+                reject(err);
+            }
+        });
+    });
+}
+
+// Restores the DB from `filename`, taking a fresh safety backup first so a bad restore can
+// itself be undone. mysqldump's default output includes `DROP TABLE IF EXISTS` before each
+// `CREATE TABLE`, so importing it fully replaces both tables' schema and data.
+async function restoreBackup(filename) {
+    if (!clientTool) {
+        throw new Error('mysql (or mariadb) client is not available on PATH — install MySQL/MariaDB client tools on this host');
+    }
+    const targetPath = resolveBackupPath(filename);
+    if (!targetPath || !fs.existsSync(targetPath)) {
+        const err = new Error('Backup not found');
+        err.status = 404;
+        throw err;
+    }
+
+    const safetyBackup = await runBackup();
+
+    await new Promise((resolve, reject) => {
+        const cnfPath = writeClientCnf();
+        const client = spawn(clientTool, [
+            `--defaults-extra-file=${cnfPath}`,
+            '-h', process.env.DB_HOST || '127.0.0.1',
+            '-P', String(process.env.DB_PORT || 3306),
+            process.env.DB_NAME,
+        ]);
+
+        let stderr = '';
+        client.stderr.on('data', chunk => { stderr += chunk; });
+        client.on('error', err => { fs.unlink(cnfPath, () => {}); reject(err); });
+        client.on('close', code => {
+            fs.unlink(cnfPath, () => {});
+            if (code !== 0) return reject(new Error(`${clientTool} exited with code ${code}: ${stderr.trim()}`));
+            resolve();
+        });
+
+        fs.createReadStream(targetPath).pipe(zlib.createGunzip()).pipe(client.stdin);
+    });
+
+    return safetyBackup;
+}
 
 function parseDependsOn(row) {
     if (row.depends_on == null) return { ...row, depends_on: [] };
@@ -326,6 +507,57 @@ app.get('/api/attachments/:attachmentId/download', async (req, res) => {
     }
 });
 
+// GET all backups
+app.get('/api/backups', async (req, res) => {
+    try {
+        res.json(await listBackups());
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// POST trigger a backup now
+app.post('/api/backups', async (req, res) => {
+    try {
+        res.status(201).json(await runBackup());
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// GET download a backup file
+app.get('/api/backups/:filename/download', (req, res) => {
+    const targetPath = resolveBackupPath(req.params.filename);
+    if (!targetPath || !fs.existsSync(targetPath)) {
+        return res.status(404).json({ error: 'Backup not found' });
+    }
+    res.download(targetPath, req.params.filename);
+});
+
+// POST restore the DB from a backup — destructive; takes a safety backup of the current DB first
+app.post('/api/backups/:filename/restore', async (req, res) => {
+    try {
+        const safetyBackup = await restoreBackup(req.params.filename);
+        res.json({ restored: req.params.filename, safety_backup: safetyBackup.filename });
+    } catch (error) {
+        res.status(error.status || 500).json({ error: error.message });
+    }
+});
+
+// DELETE a backup file
+app.delete('/api/backups/:filename', async (req, res) => {
+    const targetPath = resolveBackupPath(req.params.filename);
+    if (!targetPath || !fs.existsSync(targetPath)) {
+        return res.status(404).json({ error: 'Backup not found' });
+    }
+    try {
+        await fs.promises.unlink(targetPath);
+        res.status(204).send();
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Global error handler — catches anything an async route handler forgot to try/catch itself
 // (e.g. a thrown error before an await), so it comes back as a 500 instead of crashing the process.
 app.use((err, req, res, _next) => {
@@ -334,7 +566,18 @@ app.use((err, req, res, _next) => {
 });
 
 const PORT = process.env.PORT || 3000;
-Promise.all([setupDatabase(), setupMinio()]).then(() => {
+Promise.all([setupDatabase(), setupMinio(), resolveBackupTools()]).then(() => {
+    if (BACKUP_CRON === 'off') {
+        console.log('Scheduled backups disabled (BACKUP_CRON=off)');
+    } else if (!cron.validate(BACKUP_CRON)) {
+        console.warn(`Warning: BACKUP_CRON ("${BACKUP_CRON}") is not a valid cron expression — scheduled backups are disabled.`);
+    } else {
+        cron.schedule(BACKUP_CRON, () => {
+            runBackup().catch(err => console.error('Scheduled backup failed:', err.message));
+        });
+        console.log(`Scheduled backups: "${BACKUP_CRON}" (retaining last ${BACKUP_RETENTION}) -> ${BACKUP_DIR}`);
+    }
+
     app.listen(PORT, () => {
         console.log(`Server running on port ${PORT}`);
     });

@@ -501,6 +501,156 @@ function deleteConfig(id) {
     );
 }
 
+// ---------------------------------------------------------------------------- backups
+
+let backups = [];
+let pendingRestoreFilename = null;
+
+async function fetchBackups() {
+    try {
+        const res = await fetch('/api/backups');
+        if (!res.ok) throw new Error('Server error');
+        backups = await res.json();
+        renderBackups();
+    } catch (err) {
+        console.error('Error fetching backups:', err);
+        document.getElementById('backups-list').innerHTML = '<p class="text-[10px] text-[var(--accent-pink)]">Failed to load backups.</p>';
+    }
+}
+
+function renderBackups() {
+    const container = document.getElementById('backups-list');
+    if (!backups.length) {
+        container.innerHTML = '<p class="text-[10px] text-[var(--text-faint)]">No backups yet.</p>';
+        return;
+    }
+    container.innerHTML = backups.map(b => `
+        <div class="well rounded-lg p-3 flex items-center justify-between gap-2 min-w-0">
+            <div class="min-w-0">
+                <p class="text-xs font-mono text-[var(--text)] truncate">${escapeHtml(b.filename)}</p>
+                <p class="text-[10px] text-[var(--text-faint)]">${new Date(b.created_at).toLocaleString()} &middot; ${formatBytes(b.size_bytes)}</p>
+            </div>
+            <div class="flex items-center gap-2 shrink-0">
+                <a href="/api/backups/${encodeURIComponent(b.filename)}/download" class="p-1.5 btn rounded-md text-glow-cyan" title="Download backup">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5 5-5M12 15V3" /></svg>
+                </a>
+                <button type="button" onclick="openRestoreModal('${escapeAttr(b.filename)}')" class="p-1.5 btn rounded-md text-[var(--text-muted)]" title="Restore this backup">
+                    <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+                </button>
+                <button type="button" onclick="deleteBackup('${escapeAttr(b.filename)}')" class="p-1.5 btn rounded-md text-[var(--accent-pink)]" title="Delete backup">&times;</button>
+            </div>
+        </div>
+    `).join('');
+}
+
+function openBackupsModal() {
+    document.getElementById('backups-modal').classList.remove('hidden');
+    setTimeout(() => {
+        document.querySelector('#backups-modal .card').classList.add('modal-enter-active');
+    }, 10);
+    fetchBackups();
+}
+
+function closeBackupsModal() {
+    document.querySelector('#backups-modal .card').classList.remove('modal-enter-active');
+    setTimeout(() => {
+        document.getElementById('backups-modal').classList.add('hidden');
+    }, 300);
+}
+
+async function triggerBackup() {
+    const btn = document.getElementById('backup-now-btn');
+    btn.disabled = true;
+    btn.classList.add('opacity-50');
+    try {
+        const res = await fetch('/api/backups', { method: 'POST' });
+        if (!res.ok) {
+            const body = await res.json().catch(() => null);
+            throw new Error(body && body.error ? body.error : `Server error (${res.status})`);
+        }
+        await fetchBackups();
+    } catch (err) {
+        alert(`Error creating backup: ${err.message}`);
+        console.error(err);
+    } finally {
+        btn.disabled = false;
+        btn.classList.remove('opacity-50');
+    }
+}
+
+function deleteBackup(filename) {
+    showConfirmModal(
+        'Delete Backup',
+        `Are you sure you want to delete ${filename}?`,
+        async () => {
+            try {
+                const res = await fetch(`/api/backups/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+                if (!res.ok) throw new Error('Server error');
+                await fetchBackups();
+            } catch (err) {
+                alert('Error deleting backup');
+                console.error(err);
+            }
+        }
+    );
+}
+
+// Restoring overwrites the live database, so it gets a stronger, type-to-confirm flow rather
+// than the generic confirm modal used for deletes.
+function openRestoreModal(filename) {
+    pendingRestoreFilename = filename;
+    document.getElementById('restore-modal-filename').textContent = filename;
+    const input = document.getElementById('restore-confirm-input');
+    input.value = '';
+    updateRestoreButtonState();
+
+    document.getElementById('restore-modal').classList.remove('hidden');
+    setTimeout(() => {
+        document.querySelector('#restore-modal .card').classList.add('modal-enter-active');
+    }, 10);
+    setTimeout(() => input.focus(), 60);
+}
+
+function closeRestoreModal() {
+    const modalContent = document.querySelector('#restore-modal .card');
+    if (modalContent) modalContent.classList.remove('modal-enter-active');
+    setTimeout(() => {
+        document.getElementById('restore-modal').classList.add('hidden');
+        pendingRestoreFilename = null;
+    }, 300);
+}
+
+function updateRestoreButtonState() {
+    const input = document.getElementById('restore-confirm-input');
+    const btn = document.getElementById('restore-modal-btn');
+    const matches = pendingRestoreFilename && input.value === pendingRestoreFilename;
+    btn.disabled = !matches;
+    btn.classList.toggle('opacity-40', !matches);
+    btn.classList.toggle('cursor-not-allowed', !matches);
+}
+
+async function performRestore() {
+    if (!pendingRestoreFilename) return;
+    const filename = pendingRestoreFilename;
+    const btn = document.getElementById('restore-modal-btn');
+    btn.disabled = true;
+    try {
+        const res = await fetch(`/api/backups/${encodeURIComponent(filename)}/restore`, { method: 'POST' });
+        if (!res.ok) {
+            const body = await res.json().catch(() => null);
+            throw new Error(body && body.error ? body.error : `Server error (${res.status})`);
+        }
+        closeRestoreModal();
+        await fetchBackups();
+        await fetchData();
+        alert(`Restored from ${filename}.`);
+    } catch (err) {
+        alert(`Error restoring backup: ${err.message}`);
+        console.error(err);
+        btn.disabled = false;
+    }
+}
+
 // Event listeners for search, filters
 document.addEventListener('DOMContentLoaded', () => {
     applyTheme(document.documentElement.getAttribute('data-theme') || 'dark');
@@ -534,6 +684,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         closeConfirmModal();
     });
+
+    document.getElementById('restore-confirm-input')?.addEventListener('input', updateRestoreButtonState);
+    document.getElementById('restore-modal-btn')?.addEventListener('click', performRestore);
 });
 
 // Initial fetch

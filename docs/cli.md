@@ -36,6 +36,19 @@ prompt and is **required** when stdin isn't a terminal:
 | `rename-attachment <attachmentId> <newName>` | Rename an attachment (display name only) |
 | `delete-attachment <attachmentId>` | Delete an attachment by id |
 
+**Backups** — the server backs up the database automatically on a schedule; these are for
+on-demand use. `restore-backup` is the one command here more dangerous than `delete` (it
+overwrites the live database), so its confirmation prompt says so explicitly — the server also
+takes a fresh safety backup of the current database before restoring:
+
+| Command | Description |
+|---|---|
+| `backup` | Trigger a backup of the database now |
+| `list-backups [--json]` | List available backups, newest first |
+| `restore-backup <filename>` | **Overwrite the live database** from a backup (a safety backup of the current DB is taken first) |
+| `download-backup <filename> <outfile>` | Download a backup file |
+| `delete-backup <filename>` | Delete a backup file |
+
 **Base URL** resolution, in order: the `--url <url>` flag, then `$VULNDB_UI_URL`, then
 `http://127.0.0.1:3000`. `VULNDB_UI_URL` is the same env var name nakon itself uses, so setting
 it once in the environment covers both tools.
@@ -49,6 +62,9 @@ echo '{"name":"x","platform":"linux","category":"misconfiguration","type":"bash"
   | vulndb-cli create --file - --yes
 vulndb-cli upload suid-find ./malicious.conf
 vulndb-cli --url http://10.0.0.118:3000 list
+vulndb-cli backup --yes
+vulndb-cli list-backups
+vulndb-cli restore-backup vulndb-backup-2026-08-01T03-00-00-000Z.sql.gz
 ```
 
 `update` and `describe` do a read-modify-write, because `PUT /api/configurations/:id` is a full
