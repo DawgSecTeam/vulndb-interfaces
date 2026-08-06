@@ -17,6 +17,16 @@ app.use(express.static(path.join(__dirname, 'public')));
 const { Client } = require('ssh2');
 const net = require('net');
 
+// These are all required to bring up the SSH tunnel, DB pool, and MinIO client below — a
+// missing one used to surface as an opaque connection failure well after startup.
+const REQUIRED_ENV = ['DB_USER', 'DB_PASSWORD', 'DB_NAME', 'SSH_HOST', 'SSH_USER', 'SSH_PASSWORD', 'MINIO_URL', 'MINIO_ACCESS_KEY', 'MINIO_SECRET_KEY', 'MINIO_BUCKET'];
+const missingEnv = REQUIRED_ENV.filter(k => !process.env[k]);
+if (missingEnv.length) {
+    console.error(`Missing required environment variables: ${missingEnv.join(', ')}`);
+    console.error('See .env.example for the full list.');
+    process.exit(1);
+}
+
 let pool;
 let minioClient;
 const upload = multer({ dest: os.tmpdir() });
@@ -28,10 +38,10 @@ const setupDatabase = () => {
         // Start a local server to pipe to the SSH tunnel
         const server = net.createServer(socket => {
             sshClient.forwardOut(
-                socket.remoteAddress,
-                socket.remotePort,
+                socket.remoteAddress || '127.0.0.1',
+                socket.remotePort || 0,
                 process.env.DB_HOST || '127.0.0.1',
-                process.env.DB_PORT || 3306,
+                Number(process.env.DB_PORT) || 3306,
                 (err, stream) => {
                     if (err) {
                         console.error('SSH forwardOut error:', err);
@@ -73,7 +83,7 @@ const setupDatabase = () => {
         // Connect SSH using credentials from .env
         sshClient.connect({
             host: process.env.SSH_HOST,
-            port: process.env.SSH_PORT || 22,
+            port: Number(process.env.SSH_PORT) || 22,
             username: process.env.SSH_USER,
             password: process.env.SSH_PASSWORD
         });
@@ -100,7 +110,13 @@ const setupMinio = async () => {
 function parseDependsOn(row) {
     if (row.depends_on == null) return { ...row, depends_on: [] };
     if (typeof row.depends_on === 'string') {
-        return { ...row, depends_on: JSON.parse(row.depends_on) };
+        try {
+            return { ...row, depends_on: JSON.parse(row.depends_on) };
+        } catch {
+            // Malformed JSON shouldn't be possible through the validated API, but a row edited
+            // directly in the DB could have it — don't let that 500 every read of the table.
+            return { ...row, depends_on: [] };
+        }
     }
     return row;
 }
@@ -129,15 +145,48 @@ app.get('/api/configurations', async (req, res) => {
     }
 });
 
+const PLATFORMS = ['linux', 'windows', 'other'];
+const CATEGORIES = ['misconfiguration', 'service', 'vulnerability'];
+const TYPES = ['bash', 'powershell', 'command'];
+
+// Returns an error string, or null if the body is acceptable.
+//
+// These columns are MySQL ENUMs, so a bad value used to surface as a bare driver error (or, on a
+// non-strict server, a silently truncated row). Now that programs write here — vulndb-cli create,
+// and agents through it — a malformed write should come back as a clear 400.
+//
+// Deliberately NOT enforced: a non-empty script. Some catalog rows legitimately carry an empty
+// script and do all their work through depends_on (suid-vim is just install-package PACKAGE=vim),
+// and rejecting those would make it impossible to edit their description. `nakon catalog check`
+// warns about empty scripts, which is the right place for a judgement call rather than a hard 400.
+function validateConfiguration(body) {
+    if (typeof body !== 'object' || body === null) return 'body must be a JSON object';
+    if (typeof body.name !== 'string' || !body.name.trim()) return 'name is required';
+    if (!PLATFORMS.includes(body.platform)) return `platform must be one of ${PLATFORMS.join(', ')}`;
+    if (!CATEGORIES.includes(body.category)) return `category must be one of ${CATEGORIES.join(', ')}`;
+    if (!TYPES.includes(body.type)) return `type must be one of ${TYPES.join(', ')}`;
+    if (typeof body.script !== 'string') return 'script must be a string';
+    if (body.description != null && typeof body.description !== 'string') {
+        return 'description must be a string or null';
+    }
+    if (body.depends_on != null && !Array.isArray(body.depends_on)) {
+        return 'depends_on must be an array';
+    }
+    return null;
+}
+
 // POST a new configuration
 app.post('/api/configurations', async (req, res) => {
-    const { name, platform, category, type, script, run_as, depends_on } = req.body;
+    const invalid = validateConfiguration(req.body);
+    if (invalid) return res.status(400).json({ error: invalid });
+
+    const { name, description, platform, category, type, script, run_as, depends_on } = req.body;
     try {
         const [result] = await pool.query(
-            'INSERT INTO configurations (name, platform, category, type, script, run_as, depends_on) VALUES (?, ?, ?, ?, ?, ?, ?)',
-            [name, platform, category, type, script, run_as, JSON.stringify(depends_on || [])]
+            'INSERT INTO configurations (name, description, platform, category, type, script, run_as, depends_on) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+            [name, description ?? null, platform, category, type, script, run_as, JSON.stringify(depends_on || [])]
         );
-        res.status(201).json({ id: result.insertId, name, platform, category, type, script, run_as, depends_on: depends_on || [] });
+        res.status(201).json({ id: result.insertId, name, description: description ?? null, platform, category, type, script, run_as, depends_on: depends_on || [] });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -145,13 +194,16 @@ app.post('/api/configurations', async (req, res) => {
 
 // PUT update a configuration
 app.put('/api/configurations/:id', async (req, res) => {
-    const { name, platform, category, type, script, run_as, depends_on } = req.body;
+    const invalid = validateConfiguration(req.body);
+    if (invalid) return res.status(400).json({ error: invalid });
+
+    const { name, description, platform, category, type, script, run_as, depends_on } = req.body;
     try {
         await pool.query(
-            'UPDATE configurations SET name = ?, platform = ?, category = ?, type = ?, script = ?, run_as = ?, depends_on = ? WHERE id = ?',
-            [name, platform, category, type, script, run_as, JSON.stringify(depends_on || []), req.params.id]
+            'UPDATE configurations SET name = ?, description = ?, platform = ?, category = ?, type = ?, script = ?, run_as = ?, depends_on = ? WHERE id = ?',
+            [name, description ?? null, platform, category, type, script, run_as, JSON.stringify(depends_on || []), req.params.id]
         );
-        res.json({ id: req.params.id, name, platform, category, type, script, run_as, depends_on: depends_on || [] });
+        res.json({ id: req.params.id, name, description: description ?? null, platform, category, type, script, run_as, depends_on: depends_on || [] });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -272,6 +324,13 @@ app.get('/api/attachments/:attachmentId/download', async (req, res) => {
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
+});
+
+// Global error handler — catches anything an async route handler forgot to try/catch itself
+// (e.g. a thrown error before an await), so it comes back as a 500 instead of crashing the process.
+app.use((err, req, res, _next) => {
+    console.error('Unhandled error:', err);
+    res.status(500).json({ error: 'Internal server error' });
 });
 
 const PORT = process.env.PORT || 3000;

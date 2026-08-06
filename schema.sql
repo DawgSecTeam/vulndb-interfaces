@@ -1,9 +1,15 @@
 -- Schema for the `vulns` database used by vulndb-ui.
 -- Run this against a fresh MySQL/MariaDB instance to recreate the structure.
 
+-- `description` is prose for humans and for agents that pick a competition's misconfig set.
+-- It is the only place difficulty, realism and cross-config couplings are recorded, so a good
+-- one says what the config changes on the box, why a real system would plausibly have it, and
+-- what a defender would notice — e.g. "installs vsftpd with Ubuntu's default anonymous_enable=NO,
+-- so an anonymous FTP check can never pass but a local login does".
 CREATE TABLE IF NOT EXISTS configurations (
     id          INT(11)      NOT NULL AUTO_INCREMENT,
     name        VARCHAR(255) NOT NULL,
+    description TEXT         NULL,
     platform    ENUM('linux', 'windows', 'other') NOT NULL,
     category    ENUM('misconfiguration', 'service', 'vulnerability') NOT NULL DEFAULT 'misconfiguration',
     depends_on  LONGTEXT     NULL,
