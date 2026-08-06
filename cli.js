@@ -385,6 +385,23 @@ async function cmdDeleteBackup(base, filename, assumeYes) {
     console.log(`deleted ${filename}`);
 }
 
+async function cmdUploadBackup(base, filePath) {
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile()) throw new Error(`${filePath} is not a file`);
+
+    const buffer = fs.readFileSync(filePath);
+    const form = new FormData();
+    form.append('file', new Blob([buffer]), path.basename(filePath));
+
+    const res = await fetch(`${base}/api/backups/upload`, { method: 'POST', body: form });
+    if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        throw new Error(`upload-backup -> ${res.status} ${res.statusText}\n${text}`);
+    }
+    const backup = await res.json();
+    console.log(`uploaded ${path.basename(filePath)} -> ${backup.filename} (${formatBytes(backup.size_bytes)})`);
+}
+
 // ---------------------------------------------------------------------------- entry point
 
 const USAGE = `usage: vulndb-cli [--url <vulndb-ui url>] <command> [args]
@@ -416,6 +433,7 @@ backups (server backs up the DB automatically; these are for on-demand use):
   restore-backup <filename>             OVERWRITE the live database from a backup
                                          (a safety backup of the current DB is taken first)
   download-backup <filename> <outfile>  download a backup file
+  upload-backup <file>                  upload a previously-downloaded backup file
   delete-backup <filename>              delete a backup file`;
 
 async function main() {
@@ -463,6 +481,9 @@ async function main() {
         case 'download-backup':
             if (!rest[0] || !rest[1]) throw new Error('usage: download-backup <filename> <outfile>');
             return cmdDownloadBackup(base, rest[0], rest[1]);
+        case 'upload-backup':
+            if (!rest[0]) throw new Error('usage: upload-backup <file>');
+            return cmdUploadBackup(base, rest[0]);
         case 'delete-backup':
             if (!rest[0]) throw new Error('usage: delete-backup <filename>');
             return cmdDeleteBackup(base, rest[0], assumeYes);

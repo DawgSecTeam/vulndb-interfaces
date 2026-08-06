@@ -578,6 +578,31 @@ async function triggerBackup() {
     }
 }
 
+async function uploadBackupFile(file) {
+    if (!file) return;
+    const btn = document.getElementById('backup-upload-btn');
+    btn.disabled = true;
+    btn.classList.add('opacity-50');
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+        const res = await fetch('/api/backups/upload', { method: 'POST', body: formData });
+        if (!res.ok) {
+            const body = await res.json().catch(() => null);
+            throw new Error(body && body.error ? body.error : `Server error (${res.status})`);
+        }
+        await fetchBackups();
+    } catch (err) {
+        alert(`Error uploading backup: ${err.message}`);
+        console.error(err);
+    } finally {
+        btn.disabled = false;
+        btn.classList.remove('opacity-50');
+    }
+}
+
 function deleteBackup(filename) {
     showConfirmModal(
         'Delete Backup',
@@ -675,6 +700,17 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('attachment-file-input')?.addEventListener('change', (e) => {
         const file = e.target.files[0];
         uploadAttachment(file);
+        e.target.value = '';
+    });
+
+    document.getElementById('backup-upload-btn')?.addEventListener('click', () => {
+        if (!document.getElementById('backup-upload-btn').disabled) {
+            document.getElementById('backup-file-input').click();
+        }
+    });
+    document.getElementById('backup-file-input')?.addEventListener('change', (e) => {
+        const file = e.target.files[0];
+        uploadBackupFile(file);
         e.target.value = '';
     });
 

@@ -53,6 +53,7 @@ These endpoints are for on-demand use from the webui's "Backups" panel or `vulnd
 |---|---|
 | `GET /api/backups` | List backups, newest first: `{ filename, size_bytes, created_at }`. |
 | `POST /api/backups` | Trigger a backup now. Returns `201` with the new backup's metadata. |
+| `POST /api/backups/upload` | Upload a previously-downloaded backup file (multipart, field `file`). Rejects anything that isn't a gzip'd `mysqldump`/`mariadb-dump` with `400`. Returns `201` with the same metadata shape as `POST /api/backups` — the uploaded file is always given a fresh server-generated filename, never the client's. |
 | `GET /api/backups/:filename/download` | Download a backup file (`.sql.gz`). |
 | `POST /api/backups/:filename/restore` | **Overwrites the live database** with the backup's contents. Takes a fresh safety backup of the current database first. Returns `{ restored, safety_backup }`. |
 | `DELETE /api/backups/:filename` | Delete a backup file. |

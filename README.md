@@ -27,10 +27,13 @@ recent `BACKUP_RETENTION` copies (default 30). This requires `mysqldump` and
 `server.js`, since the DB and the server are expected to run on the same
 machine in production (the SSH tunnel above is a dev-time convenience).
 
-Backups can be listed, triggered on demand, downloaded, restored, and deleted
-from the webui's "Backups" panel or via `vulndb-cli` (`backup`,
-`list-backups`, `restore-backup`, `download-backup`, `delete-backup` — see
-[`docs/cli.md`](docs/cli.md)). Restoring overwrites the live database, so
+Backups can be listed, triggered on demand, downloaded, uploaded, restored,
+and deleted from the webui's "Backups" panel or via `vulndb-cli` (`backup`,
+`list-backups`, `restore-backup`, `download-backup`, `upload-backup`,
+`delete-backup` — see [`docs/cli.md`](docs/cli.md)). Uploading accepts a
+previously-downloaded `.sql.gz` file back in — handy for moving a backup
+between hosts — and rejects anything that isn't actually a gzip'd
+`mysqldump`/`mariadb-dump`. Restoring overwrites the live database, so
 both the webui and CLI require an explicit confirmation, and the server takes
 a fresh safety backup of the current database immediately before overwriting
 it. See `BACKUP_DIR`/`BACKUP_CRON`/`BACKUP_RETENTION` in `.env.example`.

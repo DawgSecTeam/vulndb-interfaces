@@ -47,6 +47,7 @@ takes a fresh safety backup of the current database before restoring:
 | `list-backups [--json]` | List available backups, newest first |
 | `restore-backup <filename>` | **Overwrite the live database** from a backup (a safety backup of the current DB is taken first) |
 | `download-backup <filename> <outfile>` | Download a backup file |
+| `upload-backup <file>` | Upload a previously-downloaded backup file |
 | `delete-backup <filename>` | Delete a backup file |
 
 **Base URL** resolution, in order: the `--url <url>` flag, then `$VULNDB_UI_URL`, then
@@ -65,6 +66,7 @@ vulndb-cli --url http://10.0.0.118:3000 list
 vulndb-cli backup --yes
 vulndb-cli list-backups
 vulndb-cli restore-backup vulndb-backup-2026-08-01T03-00-00-000Z.sql.gz
+vulndb-cli upload-backup ./vulndb-backup-2026-08-01T03-00-00-000Z.sql.gz
 ```
 
 `update` and `describe` do a read-modify-write, because `PUT /api/configurations/:id` is a full

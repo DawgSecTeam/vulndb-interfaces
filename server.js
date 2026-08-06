@@ -49,6 +49,20 @@ if (BACKUP_DIR === PUBLIC_DIR || BACKUP_DIR.startsWith(PUBLIC_DIR + path.sep)) {
     process.exit(1);
 }
 
+// BACKUP_DIR is optional and silently defaults to ~/.vulndb-backups (see above) — persist the
+// resolved path back to .env the first time so it's on record rather than only living in memory.
+// Only acts if the key isn't already there at all; never touches an existing (even empty) value.
+const envPath = path.resolve(process.cwd(), '.env');
+try {
+    const envContents = fs.existsSync(envPath) ? fs.readFileSync(envPath, 'utf8') : '';
+    if (!/^BACKUP_DIR=/m.test(envContents)) {
+        const prefix = envContents && !envContents.endsWith('\n') ? '\n' : '';
+        fs.appendFileSync(envPath, `${prefix}BACKUP_DIR=${BACKUP_DIR}\n`);
+    }
+} catch (err) {
+    console.warn(`Warning: could not persist BACKUP_DIR to ${envPath}: ${err.message}`);
+}
+
 fs.mkdirSync(BACKUP_DIR, { recursive: true, mode: 0o700 });
 try {
     const mode = fs.statSync(BACKUP_DIR).mode & 0o777;
@@ -167,6 +181,35 @@ function writeClientCnf() {
     return cnfPath;
 }
 
+// Sanity-checks an uploaded file is actually a gzip'd mysqldump/mariadb-dump before it's allowed
+// into BACKUP_DIR — catches "not gzip at all" and "gzip of something that isn't a SQL dump"
+// without needing to decompress (or even read) the whole file: mysqldump/mariadb-dump always
+// write a `-- MySQL dump`/`-- MariaDB dump` header comment as the first line of their output.
+function looksLikeMysqldump(filePath) {
+    return new Promise(resolve => {
+        let settled = false;
+        const finish = ok => {
+            if (settled) return;
+            settled = true;
+            read.destroy();
+            gunzip.destroy();
+            resolve(ok);
+        };
+
+        const read = fs.createReadStream(filePath);
+        const gunzip = zlib.createGunzip();
+        let head = '';
+        gunzip.on('data', chunk => {
+            head += chunk.toString('utf8');
+            if (head.length >= 32) finish(/^-- (MySQL|MariaDB) dump/.test(head));
+        });
+        gunzip.on('end', () => finish(/^-- (MySQL|MariaDB) dump/.test(head)));
+        gunzip.on('error', () => finish(false));
+        read.on('error', () => finish(false));
+        read.pipe(gunzip);
+    });
+}
+
 // Resolves a filename param to a real path inside BACKUP_DIR, or null if it doesn't look like a
 // backup this server generated — the regex alone rules out traversal, the dirname check is
 // defense in depth against a future looser regex.
@@ -274,15 +317,34 @@ async function restoreBackup(filename) {
         ]);
 
         let stderr = '';
+        let settled = false;
+        const fail = err => {
+            if (settled) return;
+            settled = true;
+            fs.unlink(cnfPath, () => {});
+            // A gunzip error otherwise leaves stdin stalled mid-stream with nothing to end it —
+            // kill the child rather than leak a hung mysql/mariadb process. Safe to call
+            // unconditionally: killing an already-erroring/exited process is a no-op.
+            client.kill();
+            reject(err);
+        };
+
         client.stderr.on('data', chunk => { stderr += chunk; });
-        client.on('error', err => { fs.unlink(cnfPath, () => {}); reject(err); });
+        client.on('error', fail);
         client.on('close', code => {
+            if (settled) return;
+            settled = true;
             fs.unlink(cnfPath, () => {});
             if (code !== 0) return reject(new Error(`${clientTool} exited with code ${code}: ${stderr.trim()}`));
             resolve();
         });
 
-        fs.createReadStream(targetPath).pipe(zlib.createGunzip()).pipe(client.stdin);
+        // A corrupt/non-gzip backup (most likely a hand-placed or otherwise mangled file — uploads
+        // are validated at upload time) must not crash the process: an unhandled 'error' on a
+        // stream throws, so gunzip needs the same failure path as the client process above.
+        const gunzip = zlib.createGunzip();
+        gunzip.on('error', fail);
+        fs.createReadStream(targetPath).pipe(gunzip).pipe(client.stdin);
     });
 
     return safetyBackup;
@@ -525,13 +587,45 @@ app.post('/api/backups', async (req, res) => {
     }
 });
 
+// POST upload a previously-downloaded backup file
+app.post('/api/backups/upload', upload.single('file'), async (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({ error: 'No file uploaded' });
+    }
+    try {
+        if (!(await looksLikeMysqldump(req.file.path))) {
+            return res.status(400).json({ error: 'Not a valid gzip mysqldump backup' });
+        }
+
+        // Never trust the client's filename — mint the same kind of name runBackup() would, so
+        // it satisfies BACKUP_FILENAME_RE and behaves identically to a server-generated backup.
+        const filename = backupFilename();
+        const destPath = path.join(BACKUP_DIR, filename);
+        await fs.promises.copyFile(req.file.path, destPath);
+        await fs.promises.chmod(destPath, 0o600);
+        await pruneOldBackups();
+
+        const stat = await fs.promises.stat(destPath);
+        res.status(201).json({ filename, size_bytes: stat.size, created_at: stat.mtime.toISOString() });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    } finally {
+        fs.unlink(req.file.path, () => {});
+    }
+});
+
 // GET download a backup file
 app.get('/api/backups/:filename/download', (req, res) => {
     const targetPath = resolveBackupPath(req.params.filename);
     if (!targetPath || !fs.existsSync(targetPath)) {
         return res.status(404).json({ error: 'Backup not found' });
     }
-    res.download(targetPath, req.params.filename);
+    res.download(req.params.filename, { root: BACKUP_DIR }, err => {
+        if (err && !res.headersSent) {
+            console.error(`Backup download failed for ${req.params.filename}:`, err);
+            res.status(500).json({ error: 'Failed to download backup' });
+        }
+    });
 });
 
 // POST restore the DB from a backup — destructive; takes a safety backup of the current DB first

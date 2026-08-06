@@ -365,10 +365,15 @@
     <div id="backups-modal" class="fixed inset-0 flex items-center justify-center z-50 hidden p-4">
         <div class="absolute inset-0 bg-black/55 backdrop-blur-sm" onclick="closeBackupsModal()"></div>
         <div class="card modal-panel w-full max-w-2xl p-6 rounded-xl relative z-10 modal-enter max-h-[85vh] overflow-y-auto custom-scrollbar">
-            <div class="flex items-center justify-between mb-2">
+            <div class="flex items-center justify-between mb-2 gap-2">
                 <h2 class="text-lg font-bold text-glow-pink uppercase tracking-wider">Backups</h2>
-                <button type="button" onclick="triggerBackup()" id="backup-now-btn"
-                    class="btn text-glow-cyan font-bold py-2 px-4 rounded-lg text-xs uppercase tracking-wide shrink-0">Back Up Now</button>
+                <div class="flex items-center gap-2 shrink-0">
+                    <input type="file" id="backup-file-input" class="hidden">
+                    <button type="button" id="backup-upload-btn"
+                        class="btn text-[var(--text-muted)] font-bold py-2 px-4 rounded-lg text-xs uppercase tracking-wide">Upload</button>
+                    <button type="button" onclick="triggerBackup()" id="backup-now-btn"
+                        class="btn text-glow-cyan font-bold py-2 px-4 rounded-lg text-xs uppercase tracking-wide">Back Up Now</button>
+                </div>
             </div>
             <p class="text-[10px] text-[var(--text-faint)] mb-4">Taken automatically on a schedule and kept for a limited time. Restoring overwrites the live database — a safety backup of the current database is taken first.</p>
             <div id="backups-list" class="space-y-1.5"></div>
