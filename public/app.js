@@ -72,17 +72,18 @@ function formatBytes(bytes) {
 }
 
 function escapeAttr(str) {
-    // For use in HTML attribute values encoded as JSON (double-quoted context)
-    return String(str).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    // For use in HTML attribute values, including single-quoted onclick handler strings —
+    // the `'` escape matters for the backups panel's openRestoreModal/deleteBackup handlers.
+    return String(str).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 function dependencyChip(dep) {
     const name = typeof dep === 'string' ? dep : dep.name;
     const vars = typeof dep === 'string' ? null : dep.vars;
     const varsText = vars && Object.keys(vars).length
-        ? ` {${Object.entries(vars).map(([k, v]) => `${k}: ${v}`).join(', ')}}`
+        ? ` {${Object.entries(vars).map(([k, v]) => `${escapeHtml(k)}: ${escapeHtml(v)}`).join(', ')}}`
         : '';
-    return `<span class="px-2.5 py-1 rounded-md text-[10px] font-mono well text-[var(--text-muted)]">${name}${varsText}</span>`;
+    return `<span class="px-2.5 py-1 rounded-md text-[10px] font-mono well text-[var(--text-muted)]">${escapeHtml(name)}${varsText}</span>`;
 }
 
 function render() {
@@ -101,7 +102,7 @@ function render() {
     let filtered = configurations.filter(config => {
         // Search covers the description too — it's prose, so it's usually the only place a
         // word like "firewall" or "anonymous" appears for a config whose slug doesn't say so.
-        const haystack = `${config.name} ${config.description || ''}`.toLowerCase();
+        const haystack = `${config.name} ${config.description || ''} ${config.script || ''}`.toLowerCase();
         const matchesSearch = haystack.includes(searchTerm);
         const matchesPlatform = filterPlatform === '' || config.platform === filterPlatform;
         const matchesCategory = activeCategory === '' || config.category === activeCategory;
@@ -194,8 +195,8 @@ function addVarRow(varsContainer, key = '', value = '') {
     const row = document.createElement('div');
     row.className = 'flex gap-2 var-row mt-1.5 min-w-0';
     row.innerHTML = `
-        <input type="text" class="var-key flex-1 min-w-0 input-field rounded-lg px-3 py-1.5 text-xs" placeholder="KEY" value="${key}">
-        <input type="text" class="var-value flex-1 min-w-0 input-field rounded-lg px-3 py-1.5 text-xs" placeholder="value" value="${value}">
+        <input type="text" class="var-key flex-1 min-w-0 input-field rounded-lg px-3 py-1.5 text-xs" placeholder="KEY" value="${escapeAttr(key)}">
+        <input type="text" class="var-value flex-1 min-w-0 input-field rounded-lg px-3 py-1.5 text-xs" placeholder="value" value="${escapeAttr(value)}">
         <button type="button" class="btn p-1.5 rounded-lg text-[var(--accent-pink)] shrink-0" title="Remove variable">&times;</button>
     `;
     row.querySelector('button').addEventListener('click', () => row.remove());
@@ -222,7 +223,7 @@ function addDependencyRow(name = '', vars = {}) {
                 <button type="button" class="btn px-1.5 rounded-md text-[var(--text-faint)] move-up-btn leading-none" title="Move up">&uarr;</button>
                 <button type="button" class="btn px-1.5 rounded-md text-[var(--text-faint)] move-down-btn leading-none" title="Move down">&darr;</button>
             </div>
-            <input type="text" class="dep-name flex-1 min-w-0 input-field rounded-lg px-3 py-2 text-sm" placeholder="configuration name or package" list="configuration-names" value="${name}">
+            <input type="text" class="dep-name flex-1 min-w-0 input-field rounded-lg px-3 py-2 text-sm" placeholder="configuration name or package" list="configuration-names" value="${escapeAttr(name)}">
             <button type="button" class="btn p-2 rounded-lg text-[var(--accent-pink)] shrink-0" title="Remove dependency">&times;</button>
         </div>
         <div class="dep-vars min-w-0"></div>

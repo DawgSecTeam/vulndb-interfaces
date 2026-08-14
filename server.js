@@ -40,7 +40,10 @@ const upload = multer({ dest: os.tmpdir() });
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const BACKUP_DIR = path.resolve(process.env.BACKUP_DIR || path.join(os.homedir(), '.vulndb-backups'));
 const BACKUP_CRON = process.env.BACKUP_CRON || '0 3 * * *'; // daily at 3am; 'off' disables scheduling
-const BACKUP_RETENTION = Number(process.env.BACKUP_RETENTION) || 30;
+// Number(…) || 30 would silently turn BACKUP_RETENTION=0 into 30 — 0 is a valid "keep nothing"
+// setting — so only fall back to the default when the value is unset or not a finite number.
+const parsedRetention = Number(process.env.BACKUP_RETENTION);
+const BACKUP_RETENTION = Number.isFinite(parsedRetention) && parsedRetention >= 0 ? parsedRetention : 30;
 
 // public/ is served with express.static — backups must never be able to land there, or they'd
 // be downloadable by anyone without going through the (validated) /api/backups routes.
@@ -175,9 +178,12 @@ function backupFilename(date = new Date()) {
 
 // A short-lived credentials file beats `-p<password>` or MYSQL_PWD — neither should show up in
 // `ps`, and MYSQL_PWD is also visible to anything that can read /proc/<pid>/environ.
+// MySQL option-file values with `#` or a newline break an unquoted `key=value` line, so quote
+// each value and escape backslash/quote inside it (MySQL reads `"…"` and `\` as its escape char).
 function writeClientCnf() {
+    const optVal = v => `"${String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
     const cnfPath = path.join(os.tmpdir(), `vulndb-backup-${crypto.randomUUID()}.cnf`);
-    fs.writeFileSync(cnfPath, `[client]\nuser=${process.env.DB_USER}\npassword=${process.env.DB_PASSWORD}\n`, { mode: 0o600 });
+    fs.writeFileSync(cnfPath, `[client]\nuser=${optVal(process.env.DB_USER)}\npassword=${optVal(process.env.DB_PASSWORD)}\n`, { mode: 0o600 });
     return cnfPath;
 }
 
@@ -238,13 +244,37 @@ async function pruneOldBackups() {
     await Promise.all(stale.map(b => fs.promises.unlink(path.join(BACKUP_DIR, b.filename)).catch(() => {})));
 }
 
+// Serialize backup creation (scheduled cron, on-demand API, CLI, and uploads all mint the same
+// millisecond-timestamped filenames) — two runs in the same instant would otherwise truncate
+// each other's file. Every backup-producing path goes through this lock.
+let backupMutex = Promise.resolve();
+function withBackupLock(fn) {
+    const run = backupMutex.then(fn, fn);
+    backupMutex = run.then(() => {}, () => {});
+    return run;
+}
+
+// Mint a filename that doesn't collide with anything already on disk. The lock above handles
+// concurrent runs within this process; the existence check covers files from previous runs
+// (or the same millisecond after a clock jump). Bumping the timestamp keeps the ISO format
+// that BACKUP_FILENAME_RE and the lexical sort both depend on.
+function mintBackupFilename() {
+    let date = new Date();
+    let filename;
+    do {
+        filename = backupFilename(date);
+        date = new Date(date.getTime() + 1);
+    } while (fs.existsSync(path.join(BACKUP_DIR, filename)));
+    return filename;
+}
+
 function runBackup() {
-    return new Promise((resolve, reject) => {
+    return withBackupLock(() => new Promise((resolve, reject) => {
         if (!dumpTool) {
             return reject(new Error('mysqldump (or mariadb-dump) is not available on PATH — install MySQL/MariaDB client tools on this host'));
         }
 
-        const filename = backupFilename();
+        const filename = mintBackupFilename();
         const destPath = path.join(BACKUP_DIR, filename);
         const cnfPath = writeClientCnf();
 
@@ -265,19 +295,21 @@ function runBackup() {
             process.env.DB_NAME,
         ]);
 
+        // A dump is only a success when BOTH the child exits 0 AND its stdout has fully drained
+        // into destPath. Resolving on the write stream's 'finish' alone raced the child's 'close'
+        // and could report a successful backup for a failing dump; the gzip stream in between had
+        // no error handler at all, so a mid-write failure would crash the process. Track both
+        // conditions and only finalize when they agree.
         let stderr = '';
-        dump.stderr.on('data', chunk => { stderr += chunk; });
-        dump.on('error', fail);
-        dump.on('close', code => {
-            if (code !== 0) fail(new Error(`${dumpTool} exited with code ${code}: ${stderr.trim()}`));
-        });
-
-        const out = fs.createWriteStream(destPath, { mode: 0o600 });
-        out.on('error', fail);
-        dump.stdout.pipe(zlib.createGzip()).pipe(out);
-
-        out.on('finish', async () => {
+        let exitCode = null;
+        let streamDone = false;
+        const maybeFinish = async () => {
             if (settled) return;
+            if (exitCode !== null && exitCode !== 0) {
+                fail(new Error(`${dumpTool} exited with code ${exitCode}: ${stderr.trim()}`));
+                return;
+            }
+            if (exitCode !== 0 || !streamDone) return; // not done yet (or not started)
             settled = true;
             fs.unlink(cnfPath, () => {});
             try {
@@ -287,8 +319,19 @@ function runBackup() {
             } catch (err) {
                 reject(err);
             }
-        });
-    });
+        };
+
+        dump.stderr.on('data', chunk => { stderr += chunk; });
+        dump.on('error', fail);
+        dump.on('close', code => { exitCode = code; maybeFinish(); });
+
+        const gunzip = zlib.createGzip();
+        gunzip.on('error', fail);
+        const out = fs.createWriteStream(destPath, { mode: 0o600 });
+        out.on('error', fail);
+        out.on('finish', () => { streamDone = true; maybeFinish(); });
+        dump.stdout.pipe(gunzip).pipe(out);
+    }));
 }
 
 // Restores the DB from `filename`, taking a fresh safety backup first so a bad restore can
@@ -365,9 +408,41 @@ function parseDependsOn(row) {
 }
 
 // GET all configurations
+//
+// Backward-compatible pagination: no ?limit means no limit at all (the whole table), exactly as
+// before. With ?limit= the rows are windowed by LIMIT/OFFSET and the total row count is returned
+// in the X-Total-Count header so callers can page through. limit is clamped to a sane ceiling.
+// The attachments subquery stays unpaginated (fetched for every row, then joined in-memory) —
+// fine at catalog size; if attachments ever grow large that's a separate follow-up.
 app.get('/api/configurations', async (req, res) => {
     try {
-        const [rows] = await pool.query('SELECT * FROM configurations');
+        let limit = null;
+        let offset = null;
+        if (req.query.limit !== undefined) {
+            limit = Number.parseInt(req.query.limit, 10);
+            if (Number.isNaN(limit) || limit < 0) {
+                return res.status(400).json({ error: 'limit must be a non-negative integer' });
+            }
+            limit = Math.min(limit, 1000);
+        }
+        if (req.query.offset !== undefined) {
+            offset = Number.parseInt(req.query.offset, 10);
+            if (Number.isNaN(offset) || offset < 0) {
+                return res.status(400).json({ error: 'offset must be a non-negative integer' });
+            }
+        }
+
+        const [[{ total }]] = await pool.query('SELECT COUNT(*) AS total FROM configurations');
+
+        let rows;
+        if (limit === null) {
+            [rows] = await pool.query('SELECT * FROM configurations');
+        } else if (offset === null) {
+            [rows] = await pool.query('SELECT * FROM configurations LIMIT ?', [limit]);
+        } else {
+            [rows] = await pool.query('SELECT * FROM configurations LIMIT ? OFFSET ?', [limit, offset]);
+        }
+
         const [attachments] = await pool.query(
             'SELECT id, configuration_id, original_name, mime_type, size_bytes, uploaded_at FROM attachments'
         );
@@ -379,6 +454,7 @@ app.get('/api/configurations', async (req, res) => {
             attachmentsByConfig.set(attachment.configuration_id, list);
         }
 
+        res.set('X-Total-Count', String(total));
         res.json(rows.map(parseDependsOn).map(row => ({
             ...row,
             attachments: attachmentsByConfig.get(row.id) || []
@@ -442,10 +518,13 @@ app.put('/api/configurations/:id', async (req, res) => {
 
     const { name, description, platform, category, type, script, run_as, depends_on } = req.body;
     try {
-        await pool.query(
+        const [result] = await pool.query(
             'UPDATE configurations SET name = ?, description = ?, platform = ?, category = ?, type = ?, script = ?, run_as = ?, depends_on = ? WHERE id = ?',
             [name, description ?? null, platform, category, type, script, run_as, JSON.stringify(depends_on || []), req.params.id]
         );
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ error: 'Configuration not found' });
+        }
         res.json({ id: req.params.id, name, description: description ?? null, platform, category, type, script, run_as, depends_on: depends_on || [] });
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -599,14 +678,18 @@ app.post('/api/backups/upload', upload.single('file'), async (req, res) => {
 
         // Never trust the client's filename — mint the same kind of name runBackup() would, so
         // it satisfies BACKUP_FILENAME_RE and behaves identically to a server-generated backup.
-        const filename = backupFilename();
-        const destPath = path.join(BACKUP_DIR, filename);
-        await fs.promises.copyFile(req.file.path, destPath);
-        await fs.promises.chmod(destPath, 0o600);
-        await pruneOldBackups();
-
-        const stat = await fs.promises.stat(destPath);
-        res.status(201).json({ filename, size_bytes: stat.size, created_at: stat.mtime.toISOString() });
+        // Goes through the same lock + mint as runBackup so an upload can't collide with a
+        // concurrent backup.
+        const { filename, size_bytes, created_at } = await withBackupLock(async () => {
+            const filename = mintBackupFilename();
+            const destPath = path.join(BACKUP_DIR, filename);
+            await fs.promises.copyFile(req.file.path, destPath);
+            await fs.promises.chmod(destPath, 0o600);
+            await pruneOldBackups();
+            const stat = await fs.promises.stat(destPath);
+            return { filename, size_bytes: stat.size, created_at: stat.mtime.toISOString() };
+        });
+        res.status(201).json({ filename, size_bytes, created_at });
     } catch (error) {
         res.status(500).json({ error: error.message });
     } finally {
@@ -656,7 +739,9 @@ app.delete('/api/backups/:filename', async (req, res) => {
 // (e.g. a thrown error before an await), so it comes back as a 500 instead of crashing the process.
 app.use((err, req, res, _next) => {
     console.error('Unhandled error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    // Respect a status an upstream layer already chose (e.g. express.json's 400 on a bad body,
+    // or a 413 for an over-limit request) instead of collapsing everything to 500.
+    res.status(err.status || err.statusCode || 500).json({ error: err.status ? err.message : 'Internal server error' });
 });
 
 const PORT = process.env.PORT || 3000;

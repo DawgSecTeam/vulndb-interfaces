@@ -3,16 +3,17 @@
 Base URL defaults to `http://127.0.0.1:3000`. There is no authentication — the catalog is
 shared team state; anything with network access can read and write it.
 
-**Prefer [`vulndb-cli`](cli.md) for programmatic access** rather than calling these endpoints
-directly — it's the recommended integration point (see [`agents.md`](agents.md)) and keeps
-future catalog changes (e.g. misconfig versioning) centralized in one place. This doc describes
-the underlying contract that the CLI and the web UI are themselves built on.
+**Prefer [`vulndb-cli`](https://github.com/DawgSecTeam/vulndb-cli) for programmatic access** rather
+than calling these endpoints directly — it's the recommended integration point (see
+[`agents.md`](agents.md)), a separate versioned repo, and keeps future catalog changes (e.g.
+misconfig versioning) centralized in one place. This doc describes the underlying contract that the
+CLI and the web UI are themselves built on.
 
 ## Configurations
 
 | Endpoint | Description |
 |---|---|
-| `GET /api/configurations` | List all configurations, each with an `attachments` array (see below). |
+| `GET /api/configurations` | List all configurations, each with an `attachments` array (see below). Optional `?limit=`/`?offset=` window the rows; the total row count is in the `X-Total-Count` response header. With no `?limit` the whole table is returned (default, backward compatible). |
 | `POST /api/configurations` | Create a configuration. Body is a full configuration object (see [Data model](#data-model)). Returns `201` with the created row. |
 | `PUT /api/configurations/:id` | Full replace — fields you omit are cleared, not left alone. Returns the updated row. |
 | `DELETE /api/configurations/:id` | Delete a configuration and its attachments. Returns `204`, or `409 { error, dependents: [...] }` if another configuration still depends on it. |
