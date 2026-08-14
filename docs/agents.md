@@ -25,12 +25,13 @@ applies it, and metadata (`platform`, `category`, `type`, `run_as`, `description
 
 ## How to integrate
 
-- **Prefer `vulndb-cli` ([`cli.md`](cli.md)) over hand-rolling HTTP calls, for reads as well as
-  writes.** Routing through one interface means catalog changes on the roadmap — e.g. misconfig
-  versioning — land once in the CLI instead of being reimplemented by every client. Use `list`
-  for browsing/picking a set and `get <id|name>` for one configuration (including its
-  `attachments`); write commands validate input client-side, do read-modify-write for partial
-  updates, and print a human-readable summary of what a write will do before it happens.
+- **Prefer [`vulndb-cli`](https://github.com/DawgSecTeam/vulndb-cli) (`python3 -m vulndb_cli`) over
+  hand-rolling HTTP calls, for reads as well as writes.** It is a separate, versioned repo — the
+  sanctioned client for this API. Routing through one interface means catalog changes on the
+  roadmap — e.g. misconfig versioning — land once in the CLI instead of being reimplemented by
+  every client. Use `list` for browsing/picking a set and `get <id|name>` for one configuration
+  (including its `attachments`); write commands validate input client-side, do read-modify-write
+  for partial updates, and print a human-readable summary of what a write will do before it happens.
 - The raw HTTP contract ([`api.md`](api.md)) is still documented for cases the CLI doesn't cover
   — it's what the CLI and the web UI are themselves built on.
 - **Non-interactive writes require `--yes`.** Every write command asks for confirmation on a

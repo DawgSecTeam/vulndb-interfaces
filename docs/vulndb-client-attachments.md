@@ -5,11 +5,13 @@ attachments — payloads, installers, PoC binaries, etc. — alongside its scrip
 whatever runs the actual provisioning (nakon / vulndb-client): how to discover, fetch, and stage
 those files.
 
-Use `vulndb-cli` for both steps below rather than calling the HTTP API directly. It's the same
-network calls either way, but keeping discovery/fetch behind one interface means future catalog
-changes — e.g. misconfig versioning — land once in the CLI instead of being reimplemented by
-every client that talks to vulndb-ui. See [`cli.md`](cli.md) for setup/install; the raw endpoints
-are documented in [`api.md`](api.md) if you ever need them directly.
+Use [`vulndb-cli`](https://github.com/DawgSecTeam/vulndb-cli) (`python3 -m vulndb_cli`) for both
+steps below rather than calling the HTTP API directly. It's the same network calls either way, but
+keeping discovery/fetch behind one interface means future catalog changes — e.g. misconfig
+versioning — land once in the CLI instead of being reimplemented by every client that talks to
+vulndb-ui. See its [command reference](https://github.com/DawgSecTeam/vulndb-cli/blob/main/docs/cli.md)
+for setup/install; the raw endpoints are documented in [`api.md`](api.md) if you ever need them
+directly.
 
 ## Network shape — why this isn't a one-step download
 
@@ -28,7 +30,7 @@ are documented in [`api.md`](api.md) if you ever need them directly.
 ## 1. Discover attachments for a configuration
 
 ```bash
-vulndb-cli get vsftpd-anon-write
+python3 -m vulndb_cli get vsftpd-anon-write
 ```
 
 Prints the full configuration as JSON (accepts an `id` too), with an `attachments` array:
@@ -59,7 +61,7 @@ per entry.
 ## 2. Download an attachment
 
 ```bash
-vulndb-cli download 14 ./staging/malicious.conf
+python3 -m vulndb_cli download 14 ./staging/malicious.conf
 ```
 
 This follows vulndb-ui's `302` redirect to a presigned MinIO URL and writes the bytes straight to

@@ -1,16 +1,11 @@
 {
   "name": "vulndb-ui",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "bin": {
-    "vulndb-cli": "./cli.js"
-  },
+  "description": "Catalog and editor for the scripted vulnerabilities, misconfigurations, and services used to provision vulnerable lab/range machines.",
   "scripts": {
+    "start": "node server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
-  "keywords": [],
-  "author": "",
   "license": "ISC",
   "dependencies": {
     "cors": "^2.8.6",
